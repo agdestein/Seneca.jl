@@ -1,0 +1,24 @@
+name = "Seneca"
+uuid = "efa56dca-8940-42fc-9bb6-a411bb84c5bd"
+authors = ["Syver Døving Agdestein <syverda@gmail.com>"]
+version = "1.0.0"
+
+[deps]
+AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
+
+[compat]
+AbstractFFTs = "1"
+Adapt = "4"
+CUDA = "5"
+FFTW = "1"
+KernelAbstractions = "0.9"
+LinearAlgebra = "1"
+Random = "1"
+WGLMakie = "0.13"
