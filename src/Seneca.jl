@@ -89,7 +89,7 @@ function nonlinearity!(σ, vi_vj, v, u, plan, grid)
     for i = 1:3
         apply!(twothirds!, grid, temp, u[i], grid) # Zero out high wavenumbers
         ldiv!(v[i], plan, temp) # Inverse transform
-        v[i] .*= grid.n^3
+        v[i] .*= grid.n^3 # FFT factor
     end
     #! format: off
     @. vi_vj = v.x * v.x; mul!(σ.xx, plan, vi_vj); (σ.xx ./= grid.n^3)
@@ -139,13 +139,14 @@ profile(k, kpeak) = k^4 * exp(-2 * (k / kpeak)^2)
 "Taylor-Green vortex."
 function taylorgreen(grid, plan)
     (; l, n, backend) = grid
-    x = range(zero(l), one(l), n + 1)[2:end] |> Array |> adapt(backend)
+    h = l / n
+    x = range(h / 2, 1 - h / 2, n) |> Array |> adapt(backend)
     y = reshape(x, 1, :)
     z = reshape(x, 1, 1, :)
     v = spacescalarfield(grid)
     #! format: off
-    @. v =  sinpi(2x) * cospi(2y) * sinpi(2z) / 2; ux = plan * v; ux ./= n^3
-    @. v = -cospi(2x) * sinpi(2y) * sinpi(2z) / 2; uy = plan * v; uy ./= n^3
+    @. v =  sinpi(2x / l) * cospi(2y / l) * sinpi(2z / l) / 2; ux = plan * v; ux ./= n^3
+    @. v = -cospi(2x / l) * sinpi(2y / l) * sinpi(2z / l) / 2; uy = plan * v; uy ./= n^3
     #! format: on
     v = nothing
     uz = zero(ux)
@@ -212,7 +213,7 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
     for k = 0:kdiag
         apply!(mask!, grid, mask, k, grid.n; ndrange = range) # Shell mask
         @. Emask = mask * E
-        Eshell = sum(Emask) + sum(view(Emask, 2:kmax, :, :)) # Current energy in shell
+        Eshell = sum(Emask) + sum(view(Emask,(2:kmax),:,:)) # Current energy in shell
         E0 = totalenergy * profile(k, kpeak) / totalprofile # Desired energy in shell
         factor = sqrt(E0 / Eshell) # E = u^2 / 2
         apply!(normalize!, grid, u, mask, factor; ndrange = range)
@@ -229,7 +230,7 @@ end
 function energy(u)
     kmax = size(u.x, 1) - 1
     E = @. (abs2(u.x) + abs2(u.y) + abs2(u.z)) / 2
-    sum(E) + sum(view(E, 2:kmax, :, :))
+    sum(E) + sum(view(E,(2:kmax),:,:))
 end
 
 @kernel function z_vort_kernel!(vort, u, grid)
@@ -321,6 +322,59 @@ function spectrum(u, grid; npoint = nothing, stuff = spectral_stuff(grid; npoint
     (; k, s)
 end
 
+getenergy(u) = sum(abs2, u) + sum(abs2, view(u,(2:(size(u, 1)-1)),:,:))
+
+function turbulence_statistics(u, visc, grid)
+    @kernel function strainrate!(S, u, grid)
+        I = @index(Global, Cartesian)
+        kx, ky, kz = wavenumbers(grid, I)
+        ux, uy, uz = u.x[I], u.y[I], u.z[I]
+        S.xx[I] = im * kx * ux
+        S.yy[I] = im * ky * uy
+        S.zz[I] = im * kz * uz
+        S.xy[I] = im * (ky * ux + kx * uy) / 2
+        S.yz[I] = im * (kz * uy + ky * uz) / 2
+        S.zx[I] = im * (kx * uz + kz * ux) / 2
+    end
+    e = sum(getenergy, u) / 2
+    uavg = sqrt(2 * e)
+    S = tensorfield(grid)
+    apply!(strainrate!, grid, S, u, grid)
+    Sij = spacescalarfield(grid)
+    # diss = zero(eltype(Sij))
+    # plan = plan_rfft(Sij)
+    # #! format: off
+    # ldiv!(Sij, plan, S.xx); Sij .*= grid.n^3; diss += sum(abs2, Sij) / grid.n^3
+    # ldiv!(Sij, plan, S.yy); Sij .*= grid.n^3; diss += sum(abs2, Sij) / grid.n^3
+    # ldiv!(Sij, plan, S.zz); Sij .*= grid.n^3; diss += sum(abs2, Sij) / grid.n^3
+    # ldiv!(Sij, plan, S.xy); Sij .*= grid.n^3; diss += 2 * sum(abs2, Sij) / grid.n^3
+    # ldiv!(Sij, plan, S.yz); Sij .*= grid.n^3; diss += 2 * sum(abs2, Sij) / grid.n^3
+    # ldiv!(Sij, plan, S.zx); Sij .*= grid.n^3; diss += 2 * sum(abs2, Sij) / grid.n^3
+    # #! format: on
+    # diss = 2 * visc * diss
+    diss =
+        2 *
+        visc *
+        (
+            getenergy(S.xx) +
+            getenergy(S.yy) +
+            getenergy(S.zz) +
+            2 * getenergy(S.xy) +
+            2 * getenergy(S.yz) +
+            2 * getenergy(S.zx)
+        )
+    l_kol = (visc^3 / diss)^(1 / 4)
+    l_tay = sqrt(visc / diss) * uavg
+    l_int = uavg^3 / diss
+    t_int = l_int / uavg
+    t_tay = l_tay / uavg
+    t_kol = visc / diss |> sqrt
+    Re_int = l_int * uavg / visc
+    Re_tay = l_tay * uavg / visc
+    Re_kol = l_kol * uavg / visc
+    (; uavg, diss, l_int, l_tay, l_kol, t_int, t_tay, t_kol, Re_int, Re_tay, Re_kol)
+end
+
 getcache(grid) = (;
     ustart = vectorfield(grid),
     du = vectorfield(grid),
@@ -364,7 +418,8 @@ function propose_timestep(u, cache, visc, grid)
     (; vi_vj, du, v, plan) = cache
     for i = 1:3
         copyto!(du[i], u[i])
-        ldiv!(v[i], plan, du[i])
+        ldiv!(v[i], plan, du[i]) # ldiv! overwrites input...
+        v[i] .*= grid.n^3 # FFT factor
     end
     @. vi_vj = sqrt(v.x^2 + v.y^2 + v.z^2)
     vmax = maximum(vi_vj)
@@ -421,6 +476,34 @@ function wray3!(u, cache, Δt, visc, grid)
     end
 
     u
+end
+
+function ouforcer(grid, kcut)
+    kmax = div(grid.n, 2)
+    kx = 0:kmax # For RFFT, the x-wavenumbers are 0:kmax
+    ky = reshape(map(i -> fftfreq_int(grid, i), 1:grid.n), 1, :) # Normal FFT wavenumbers
+    kz = reshape(map(i -> fftfreq_int(grid, i), 1:grid.n), 1, 1, :) # Normal FFT wavenumbers
+    kk = @. kx^2 + ky^2 + kz^2
+    kk = reshape(kk, :)
+    iuse = findall(kk -> 0 < kk < kcut^2, kk) # Exclude 0-th mode
+    kuse = kk[iuse]
+    nuse = length(iuse)
+    x = complex(grid.l)
+    b = KernelAbstractions.zeros(grid.backend, typeof(x), nuse, 3)
+    bold = zero(b)
+    (; iuse, kuse, b, bold)
+end
+
+@kernel function vectorgradient!(Gij, u, grid, i, j)
+    I = @index(Global, Cartesian)
+    kk = wavenumbers(grid, I)
+    uu = u.x[I], u.y[I], u.z[I]
+    Gij[I] = im * kk[j] * uu[i]
+end
+
+@kernel function qcrit!(q, G, grid)
+    I = @index(Global, Cartesian)
+    g = G.xx[I]
 end
 
 end
