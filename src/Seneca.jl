@@ -76,12 +76,52 @@ tensorfield(g::Grid{3}) = (;
     yz = scalarfield(g),
     zx = scalarfield(g),
 )
+tensorfield_nonsym(g::Grid{2}) =
+    (; xx = scalarfield(g), yx = scalarfield(g), xy = scalarfield(g), yy = scalarfield(g))
+tensorfield_nonsym(g::Grid{3}) = (;
+    xx = scalarfield(g),
+    yx = scalarfield(g),
+    zx = scalarfield(g),
+    xy = scalarfield(g),
+    yy = scalarfield(g),
+    zy = scalarfield(g),
+    xz = scalarfield(g),
+    yz = scalarfield(g),
+    zz = scalarfield(g),
+)
 
 spacescalarfield(g::Grid{D,T}) where {D,T} =
     KernelAbstractions.zeros(g.backend, T, ntuple(Returns(g.n), D))
 spacevectorfield(g::Grid{2}) = (; x = spacescalarfield(g), y = spacescalarfield(g))
 spacevectorfield(g::Grid{3}) =
     (; x = spacescalarfield(g), y = spacescalarfield(g), z = spacescalarfield(g))
+spacetensorfield(g::Grid{2}) =
+    (; xx = spacescalarfield(g), yy = spacescalarfield(g), xy = spacescalarfield(g))
+spacetensorfield(g::Grid{3}) = (;
+    xx = spacescalarfield(g),
+    yy = spacescalarfield(g),
+    zz = spacescalarfield(g),
+    xy = spacescalarfield(g),
+    yz = spacescalarfield(g),
+    zx = spacescalarfield(g),
+)
+spacetensorfield_nonsym(g::Grid{2}) = (;
+    xx = spacescalarfield(g),
+    yx = spacescalarfield(g),
+    xy = spacescalarfield(g),
+    yy = spacescalarfield(g),
+)
+spacetensorfield_nonsym(g::Grid{3}) = (;
+    xx = spacescalarfield(g),
+    yx = spacescalarfield(g),
+    zx = spacescalarfield(g),
+    xy = spacescalarfield(g),
+    yy = spacescalarfield(g),
+    zy = spacescalarfield(g),
+    xz = spacescalarfield(g),
+    yz = spacescalarfield(g),
+    zz = spacescalarfield(g),
+)
 
 @kernel function project!(u, g::Grid{2})
     I = @index(Global, Cartesian)
@@ -319,9 +359,14 @@ end
 @kernel function z_vort_kernel!(vort, u, grid)
     I = @index(Global, Cartesian)
     k = wavenumbers(grid, I)
+    kmax = div(grid.n, 2)
     kx, ky = k[1], k[2]
     ux, uy = u.x[I], u.y[I]
-    vort[I] = -im * ky * ux + im * kx * uy
+    w = -im * ky * ux + im * kx * uy
+    # kx = ifelse(3 * kx < 2 * kmax, kx, zero(kx))
+    # ky = ifelse(3 * ky < 2 * kmax, ky, zero(ky))
+    # vort[I] = ifelse((3 * kx ≤ 2 * kmax) & (3 * ky ≤ 2 * kmax), w, zero(w))
+    vort[I] = w
 end
 
 function z_vort!(spacevort, vort, u, plan, grid)
@@ -418,6 +463,30 @@ end
 
 getenergy(u) = sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:(size(u, 1)-1)))
 
+@kernel function vectorgradient!(G, u, g::Grid{2})
+    I = @index(Global, Cartesian)
+    kx, ky = wavenumbers(g, I)
+    ux, uy = u.x[I], u.y[I]
+    G.xx[I] = im * kx * ux
+    G.xy[I] = im * ky * ux
+    G.yx[I] = im * kx * uy
+    G.yy[I] = im * ky * uy
+end
+@kernel function vectorgradient!(G, u, g::Grid{3})
+    I = @index(Global, Cartesian)
+    kx, ky, kz = wavenumbers(g, I)
+    ux, uy, uz = u.x[I], u.y[I], u.z[I]
+    G.xx[I] = im * kx * ux
+    G.xy[I] = im * ky * ux
+    G.xz[I] = im * kz * ux
+    G.yx[I] = im * kx * uy
+    G.yy[I] = im * ky * uy
+    G.yz[I] = im * kz * uy
+    G.zx[I] = im * kx * uz
+    G.zy[I] = im * ky * uz
+    G.zz[I] = im * kz * uz
+end
+
 @kernel function strainrate!(S, u, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumbers(g, I)
@@ -470,19 +539,9 @@ function turbulence_statistics(u, visc, g)
     (; uavg, diss, l_int, l_tay, l_kol, t_int, t_tay, t_kol, Re_int, Re_tay, Re_kol)
 end
 
-getcache(grid) = (;
-    ustart = vectorfield(grid),
-    du = vectorfield(grid),
-    σ = tensorfield(grid),
-    vi_vj = spacescalarfield(grid),
-    v = spacevectorfield(grid),
-    plan = getplan(grid),
-)
-
-function forwardeuler!(u, cache, Δt, visc, grid)
-    (; σ, vi_vj, v, plan, du) = cache
-    stress!(σ, vi_vj, v, u, plan, visc, grid)
-    apply!(tensordivergence!, grid, (du, σ, grid))
+function forwardeuler!(f!, u, cache, grid, Δt; args...)
+    (; du) = cache
+    f!(du, u, grid; args...)
     for i = 1:dim(grid)
         axpy!(Δt, du[i], u[i])
     end
@@ -516,7 +575,7 @@ function abcn!(u, cache, Δt, visc, grid; firststep)
     foreach(copyto!, du_old, du)
 end
 
-function propose_timestep(u, cache, visc, grid)
+function propose_timestep(u, grid, visc, cache)
     (; vi_vj, du, v, plan) = cache
     D = dim(grid)
     for i = 1:D
@@ -533,9 +592,24 @@ function propose_timestep(u, cache, visc, grid)
     min(Δt_conv, Δt_diff)
 end
 
+function convectiondiffusion!(du, u, grid, cache; visc)
+    (; plan, σ, vi_vj, v) = cache
+    stress!(σ, vi_vj, v, u, plan, visc, grid)
+    apply!(tensordivergence!, grid, (du, σ, grid))
+end
+
+getcache(grid) = (;
+    ustart = vectorfield(grid),
+    du = vectorfield(grid),
+    σ = tensorfield(grid),
+    vi_vj = spacescalarfield(grid),
+    v = spacevectorfield(grid),
+    plan = getplan(grid),
+)
+
 "Perform time step using Wray's third-order scheme."
-function wray3!(u, cache, Δt, visc, grid)
-    (; ustart, du, σ, vi_vj, v, plan) = cache
+function wray3!(f!, u, Δt, grid, cache; args...)
+    (; ustart, du) = cache
     T = eltype(u.x)
     D = dim(grid)
 
@@ -561,8 +635,7 @@ function wray3!(u, cache, Δt, visc, grid)
     foreach(copyto!, ustart, u)
 
     for i = 1:nstage
-        stress!(σ, vi_vj, v, u, plan, visc, grid)
-        apply!(tensordivergence!, grid, (du, σ, grid))
+        f!(du, u, grid, cache; args...)
 
         # Compute u = project(ustart + Δt * a[i] * du)
         i == 1 || foreach(copyto!, u, ustart) # Skip first iter
@@ -570,6 +643,7 @@ function wray3!(u, cache, Δt, visc, grid)
             axpy!(a[i] * Δt, du[j], u[j])
         end
         apply!(project!, grid, (u, grid))
+        # foreach(u -> apply!(twothirds!, g, (u, g)), u)
 
         # Compute ustart = ustart + Δt * b[i] * du
         # Skip last iter
@@ -617,7 +691,12 @@ end
 # end
 
 export Grid, apply!, dim, tensordim
-export scalarfield, vectorfield, tensorfield, randomfield
-export getcache, propose_timestep, project!, stress!, tensordivergence!
+export scalarfield, vectorfield, tensorfield, tensorfield_nonsym, randomfield
+export spacescalarfield, spacevectorfield, spacetensorfield, spacetensorfield_nonsym
+export vectorgradient!, strainrate!, turbulence_statistics, z_vort!, energy
+export getcache, propose_timestep, project!, nonlinearity!, stress!, tensordivergence!
+export forwardeuler!, wray3!, abcn!, convectiondiffusion!
+export ouforcer
+export spectrum
 
 end
