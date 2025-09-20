@@ -55,6 +55,8 @@ end
 
 ndrange((; n)::Grid{2}) = div(n, 2) + 1, n
 ndrange((; n)::Grid{3}) = div(n, 2) + 1, n, n
+space_ndrange((; n)::Grid{2}) = n, n
+space_ndrange((; n)::Grid{3}) = n, n, n
 
 function apply!(kernel!, grid, args; ndrange = ndrange(grid))
     (; backend, workgroupsize) = grid
@@ -143,59 +145,49 @@ end
     u.z[I] = uz - kz * p
 end
 
-@kernel function twothirds!(ubar, u, g::Grid{2})
+@kernel function twothirds!(u, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = fftfreq_int(g, I)
     K = div(g.n, 2)
     ix = 3 * abs(kx) ≤ 2 * K
     iy = 3 * abs(ky) ≤ 2 * K
-    ubar[I] = ifelse(ix & iy, u[I], zero(eltype(u)))
-    # ubar[I] = ifelse(9 * (kx^2 + ky^2) ≤ 4 * K^2, u[I], zero(eltype(u)))
+    u[I] = ifelse(ix & iy, u[I], zero(eltype(u)))
+    # u[I] = ifelse(9 * (kx^2 + ky^2) ≤ 4 * K^2, u[I], zero(eltype(u)))
 end
-@kernel function twothirds!(ubar, u, g::Grid{3})
+@kernel function twothirds!(u, g::Grid{3})
     I = @index(Global, Cartesian)
     kx, ky, kz = fftfreq_int(g, I)
     K = div(g.n, 2)
     ix = 3 * abs(kx) ≤ 2 * K
     iy = 3 * abs(ky) ≤ 2 * K
     iz = 3 * abs(kz) ≤ 2 * K
-    ubar[I] = ifelse(ix & iy & iz, u[I], zero(eltype(u)))
-    # ubar[I] = ifelse(9 * (kx^2 + ky^2 + kz^2) ≤ 4 * K^2, u[I], zero(eltype(u)))
+    u[I] = ifelse(ix & iy & iz, u[I], zero(eltype(u)))
+    # u[I] = ifelse(9 * (kx^2 + ky^2 + kz^2) ≤ 4 * K^2, u[I], zero(eltype(u)))
 end
 
 getplan(grid) = plan_rfft(spacescalarfield(grid))
 
-function nonlinearity!(σ, vi_vj, v, u, plan, g::Grid{2})
+function nonlinearity!(σ, vi_vj, v, u, plan, g::Grid)
+    D = dim(g)
     temp = σ.xx # Use σ.xx as temporary complex storage
-    fac = g.n^2
-    for i = 1:2
-        apply!(twothirds!, g, (temp, u[i], g)) # Zero out high wavenumbers
+    fac = g.n^D
+    for i = 1:D
+        copyto!(temp, u[i])
+        apply!(twothirds!, g, (temp, g)) # Zero out high wavenumbers
         ldiv!(v[i], plan, temp) # Inverse transform
         v[i] .*= fac # FFT factor
     end
-    #! format: off
-    @. vi_vj = v.x * v.x; mul!(σ.xx, plan, vi_vj); (σ.xx ./= fac)
-    @. vi_vj = v.y * v.y; mul!(σ.yy, plan, vi_vj); (σ.yy ./= fac)
-    @. vi_vj = v.x * v.y; mul!(σ.xy, plan, vi_vj); (σ.xy ./= fac)
-    #! format: on
-    nothing
-end
-function nonlinearity!(σ, vi_vj, v, u, plan, g::Grid{3})
-    temp = σ.xx # Use σ.xx as temporary complex storage
-    fac = g.n^3
-    for i = 1:3
-        apply!(twothirds!, g, (temp, u[i], g)) # Zero out high wavenumbers
-        ldiv!(v[i], plan, temp) # Inverse transform
-        v[i] .*= fac # FFT factor
+    symbols = if D == 2
+        [(:x, :x), (:y, :y), (:x, :y)]
+    elseif D == 3
+        [(:x, :x), (:y, :y), (:z, :z), (:x, :y), (:y, :z), (:z, :x)]
     end
-    #! format: off
-    @. vi_vj = v.x * v.x; mul!(σ.xx, plan, vi_vj); (σ.xx ./= fac)
-    @. vi_vj = v.y * v.y; mul!(σ.yy, plan, vi_vj); (σ.yy ./= fac)
-    @. vi_vj = v.z * v.z; mul!(σ.zz, plan, vi_vj); (σ.zz ./= fac)
-    @. vi_vj = v.x * v.y; mul!(σ.xy, plan, vi_vj); (σ.xy ./= fac)
-    @. vi_vj = v.y * v.z; mul!(σ.yz, plan, vi_vj); (σ.yz ./= fac)
-    @. vi_vj = v.z * v.x; mul!(σ.zx, plan, vi_vj); (σ.zx ./= fac)
-    #! format: on
+    for (i, j) in symbols
+        ij = Symbol(i, j)
+        @. vi_vj = v[i] * v[j]
+        mul!(σ[ij], plan, vi_vj)
+        σ[ij] ./= fac
+    end
     nothing
 end
 
@@ -326,6 +318,7 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
 
     # Maximum partially resolved wavenumber (sqrt(dim) * kmax)
     kdiag = floor(Int, sqrt(3) * div(grid.n, 2))
+    # k23 = round(Int, 2 / 3 * kmax)
 
     # Sum of shell weights 
     totalprofile = sum(k -> profile(k, kpeak), 0:kdiag)
@@ -342,6 +335,9 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
             @. ui = ifelse(mask, factor * ui, ui)
         end
     end
+
+    # Set ghost cells to zero for no surprises
+    foreach(u -> apply!(twothirds!, grid, (u, grid)), u)
 
     # The velocity now has
     # the correct spectrum,
@@ -362,15 +358,12 @@ end
     kmax = div(grid.n, 2)
     kx, ky = k[1], k[2]
     ux, uy = u.x[I], u.y[I]
-    w = -im * ky * ux + im * kx * uy
-    # kx = ifelse(3 * kx < 2 * kmax, kx, zero(kx))
-    # ky = ifelse(3 * ky < 2 * kmax, ky, zero(ky))
-    # vort[I] = ifelse((3 * kx ≤ 2 * kmax) & (3 * ky ≤ 2 * kmax), w, zero(w))
-    vort[I] = w
+    vort[I] = -im * ky * ux + im * kx * uy
 end
 
 function z_vort!(spacevort, vort, u, plan, grid)
     apply!(z_vort_kernel!, grid, (vort, u, grid))
+    apply!(twothirds!, grid, (vort, grid)) # Zero out high wavenumbers
     ldiv!(spacevort, plan, vort)
     spacevort .*= grid.n^dim(grid) # FFT factor
     nothing
@@ -399,10 +392,12 @@ function spectral_stuff(grid; npoint = nothing)
     kksort = kk[isort]
 
     # Output query points (evenly log-spaced, but only integer wavenumbers)
+    kcut = div(2 * kmax, 3)
+    # kcut = kmax
     if isnothing(npoint)
-        kuse = 1:kmax
+        kuse = 1:kcut
     else
-        kuse = logrange(T(1), T(kmax), npoint)
+        kuse = logrange(T(1), T(kcut), npoint)
         kuse = sort(unique(round.(Int, kuse)))
     end
 
@@ -508,11 +503,11 @@ end
 end
 
 function turbulence_statistics(u, visc, g)
+    foreach(u -> apply!(twothirds!, g, (u, g)), u) # Ensure 2/3 dealiasing
     e = sum(getenergy, u) / 2
     uavg = sqrt(2 * e)
     S = tensorfield(g)
     apply!(strainrate!, g, (S, u, g))
-    Sij = spacescalarfield(g)
     diss = if dim(g) == 2
         2 * visc * (getenergy(S.xx) + getenergy(S.yy) + 2 * getenergy(S.xy))
     else
@@ -580,6 +575,7 @@ function propose_timestep(u, grid, visc, cache)
     D = dim(grid)
     for i = 1:D
         copyto!(du[i], u[i])
+        apply!(twothirds!, grid, (du[i], grid)) # Zero out ghost modes
         ldiv!(v[i], plan, du[i]) # ldiv! overwrites input...
         v[i] .*= grid.n^D # FFT factor
     end
@@ -643,7 +639,6 @@ function wray3!(f!, u, Δt, grid, cache; args...)
             axpy!(a[i] * Δt, du[j], u[j])
         end
         apply!(project!, grid, (u, grid))
-        # foreach(u -> apply!(twothirds!, g, (u, g)), u)
 
         # Compute ustart = ustart + Δt * b[i] * du
         # Skip last iter
@@ -690,13 +685,14 @@ end
 #     g = G.xx[I]
 # end
 
-export Grid, apply!, dim, tensordim
-export scalarfield, vectorfield, tensorfield, tensorfield_nonsym, randomfield
+export Grid, apply!, dim, tensordim, wavenumbers
+export scalarfield, vectorfield, tensorfield, tensorfield_nonsym, randomfield, taylorgreen
 export spacescalarfield, spacevectorfield, spacetensorfield, spacetensorfield_nonsym
-export vectorgradient!, strainrate!, turbulence_statistics, z_vort!, energy
+export vectorgradient!, strainrate!, turbulence_statistics, z_vort!, energy, getenergy
 export getcache, propose_timestep, project!, nonlinearity!, stress!, tensordivergence!
 export forwardeuler!, wray3!, abcn!, convectiondiffusion!
 export ouforcer
-export spectrum
+export spectrum, twothirds!
+export ndrange, space_ndrange
 
 end
