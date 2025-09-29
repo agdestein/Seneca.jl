@@ -8,11 +8,12 @@ using LinearAlgebra
 using KernelAbstractions
 using Random
 
+"Cartesian grid of a squared/cubic periodic domain."
 struct Grid{D,T,B}
     "Domain side length."
     l::T
 
-    "Number of grid points in each dimension."
+    "Number of grid points in each dimension (should be even)."
     n::Int
 
     """
@@ -24,8 +25,10 @@ struct Grid{D,T,B}
     "Kernel work group size."
     workgroupsize::Int
 
-    Grid{D}(; l, n, backend = CPU(), workgroupsize = 64) where {D} =
+    function Grid{D}(; l, n, backend = CPU(), workgroupsize = 64) where {D}
+        @assert n % 2 == 0 "Only even number of grid points supported."
         new{D,typeof(l),typeof(backend)}(l, n, backend, workgroupsize)
+    end
 end
 
 @inline dim(::Grid{D}) where {D} = D
@@ -53,11 +56,17 @@ end
     kx^2 + ky^2 + kz^2
 end
 
+"Range for RFFT sized spectral arrays."
 ndrange((; n)::Grid{2}) = div(n, 2) + 1, n
 ndrange((; n)::Grid{3}) = div(n, 2) + 1, n, n
-space_ndrange((; n)::Grid{2}) = n, n
-space_ndrange((; n)::Grid{3}) = n, n, n
 
+"Range for physical space arrays."
+space_ndrange(g::Grid, ghost) = ntuple(Returns(g.n), dim(g))
+
+"""
+Apply KernelAbstractions kernel over given ndrange
+(defaults to RFFT spectral array range).
+"""
 function apply!(kernel!, grid, args; ndrange = ndrange(grid))
     (; backend, workgroupsize) = grid
     kernel!(backend, workgroupsize)(args...; ndrange)
@@ -148,21 +157,19 @@ end
 @kernel function twothirds!(u, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = fftfreq_int(g, I)
-    K = div(g.n, 2)
-    ix = 3 * abs(kx) ≤ 2 * K
-    iy = 3 * abs(ky) ≤ 2 * K
+    kcut = div(g.n, 3)
+    ix = abs(kx) ≤ kcut
+    iy = abs(ky) ≤ kcut
     u[I] = ifelse(ix & iy, u[I], zero(eltype(u)))
-    # u[I] = ifelse(9 * (kx^2 + ky^2) ≤ 4 * K^2, u[I], zero(eltype(u)))
 end
 @kernel function twothirds!(u, g::Grid{3})
     I = @index(Global, Cartesian)
     kx, ky, kz = fftfreq_int(g, I)
-    K = div(g.n, 2)
-    ix = 3 * abs(kx) ≤ 2 * K
-    iy = 3 * abs(ky) ≤ 2 * K
-    iz = 3 * abs(kz) ≤ 2 * K
+    kcut = div(g.n, 3)
+    ix = abs(kx) ≤ kcut
+    iy = abs(ky) ≤ kcut
+    iz = abs(kz) ≤ kcut
     u[I] = ifelse(ix & iy & iz, u[I], zero(eltype(u)))
-    # u[I] = ifelse(9 * (kx^2 + ky^2 + kz^2) ≤ 4 * K^2, u[I], zero(eltype(u)))
 end
 
 getplan(grid) = plan_rfft(spacescalarfield(grid))
@@ -282,9 +289,6 @@ end
 
 """
 Make random velocity field with prescribed energy spectrum profile.
-
-Note: The profile takes the scalar wavenumber norm as input,
-define it as `profile(k)`.
 """
 function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng())
     # Mask for active wavenumbers: kleft ≤ k < kleft + 1
@@ -317,7 +321,7 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
     end
 
     # Maximum partially resolved wavenumber (sqrt(dim) * kmax)
-    kdiag = floor(Int, sqrt(3) * div(grid.n, 2))
+    kdiag = floor(Int, sqrt(3) * kmax)
     # k23 = round(Int, 2 / 3 * kmax)
 
     # Sum of shell weights 
@@ -330,9 +334,8 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
         Eshell = sum(Emask) + sum(view(Emask, 2:kmax, :, :)) # Current energy in shell
         E0 = totalenergy * profile(k, kpeak) / totalprofile # Desired energy in shell
         factor = sqrt(E0 / Eshell) # E = u^2 / 2
-        for i = 1:dim(grid)
-            ui = u[i]
-            @. ui = ifelse(mask, factor * ui, ui)
+        for u in u
+            @. u = ifelse(mask, factor * u, u)
         end
     end
 
@@ -355,7 +358,6 @@ end
 @kernel function z_vort_kernel!(vort, u, grid)
     I = @index(Global, Cartesian)
     k = wavenumbers(grid, I)
-    kmax = div(grid.n, 2)
     kx, ky = k[1], k[2]
     ux, uy = u.x[I], u.y[I]
     vort[I] = -im * ky * ux + im * kx * uy
