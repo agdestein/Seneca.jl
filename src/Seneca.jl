@@ -34,6 +34,8 @@ end
 @inline dim(::Grid{D}) where {D} = D
 @inline tensordim(::Grid{2}) = 3
 @inline tensordim(::Grid{3}) = 6
+@inline spacing(g::Grid) = g.l / g.n
+@inline volume(g::Grid{D}) where {D} = (g.l / g.n)^D
 
 # Like fftfreq, but with proper type
 @inline fftfreq_int(g::Grid, i::Int) = i - 1 - ifelse(i <= (g.n + 1) >> 1, 0, g.n)
@@ -61,7 +63,7 @@ ndrange((; n)::Grid{2}) = div(n, 2) + 1, n
 ndrange((; n)::Grid{3}) = div(n, 2) + 1, n, n
 
 "Range for physical space arrays."
-space_ndrange(g::Grid, ghost) = ntuple(Returns(g.n), dim(g))
+space_ndrange(g::Grid) = ntuple(Returns(g.n), dim(g))
 
 """
 Apply KernelAbstractions kernel over given ndrange
@@ -687,7 +689,7 @@ end
 #     g = G.xx[I]
 # end
 
-export Grid, apply!, dim, tensordim, wavenumbers
+export Grid, apply!, dim, tensordim, spacing, volume, wavenumbers
 export scalarfield, vectorfield, tensorfield, tensorfield_nonsym, randomfield, taylorgreen
 export spacescalarfield, spacevectorfield, spacetensorfield, spacetensorfield_nonsym
 export vectorgradient!, strainrate!, turbulence_statistics, z_vort!, energy, getenergy
