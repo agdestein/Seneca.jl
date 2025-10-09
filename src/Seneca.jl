@@ -486,6 +486,13 @@ end
     G.zz[I] = im * kz * uz
 end
 
+export derivative!
+@kernel function derivative!(du, u, j, g::Grid)
+    I = @index(Global, Cartesian)
+    kj = wavenumbers(g, I)[j]
+    du[I] = im * kj * u[I]
+end
+
 @kernel function strainrate!(S, u, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumbers(g, I)
