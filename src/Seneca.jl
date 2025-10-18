@@ -333,7 +333,7 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
     for k = 0:kdiag
         apply!(mask!, grid, (mask, k, grid)) # Shell mask
         @. Emask = mask * E
-        Eshell = sum(Emask) + sum(view(Emask, 2:kmax, :, :)) # Current energy in shell
+        Eshell = sum(Emask) + sum(view(Emask,(2:kmax),:,:)) # Current energy in shell
         E0 = totalenergy * profile(k, kpeak) / totalprofile # Desired energy in shell
         factor = sqrt(E0 / Eshell) # E = u^2 / 2
         for u in u
@@ -460,6 +460,7 @@ function spectrum(u, grid; npoint = nothing, stuff = spectral_stuff(grid; npoint
     (; k, s)
 end
 
+# Account for RFFT
 getenergy(u) = sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:(size(u, 1)-1)))
 
 @kernel function vectorgradient!(G, u, g::Grid{2})
@@ -514,7 +515,7 @@ end
 end
 
 function turbulence_statistics(u, visc, g)
-    foreach(u -> apply!(twothirds!, g, (u, g)), u) # Ensure 2/3 dealiasing
+    foreach(u -> apply!(twothirds!, g, (u, g)), u) # Empty ghost modes
     e = sum(getenergy, u) / 2
     uavg = sqrt(2 * e)
     S = tensorfield(g)

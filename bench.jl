@@ -13,11 +13,7 @@ using WGLMakie
 using CUDA
 lines([1, 2, 3])
 
-g = Grid{3}(;
-    l = 1.0,
-    n = 512,
-    backend = CUDABackend(),
-)
+g = Grid{3}(; l = 1.0, n = 512, backend = CUDABackend())
 
 cache = getcache(g);
 ustart = randomfield(g; kpeak = 5);
@@ -31,7 +27,6 @@ cfl = 0.85
 Δt = cfl * propose_timestep(u, g, visc, cache)
 @show Δt
 @benchmark wray3!(convectiondiffusion!, u, Δt, g, cache; visc)
-
 
 # 1 thread CPU
 # Δt = 0.0008584334033841037

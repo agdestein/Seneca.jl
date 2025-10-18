@@ -29,7 +29,7 @@ obs = let
     vort = map(o) do u
         z_vort!(cache.vi_vj, cache.du.x, u, cache.plan, g)
         copyto!(temp, cache.vi_vj)
-        view(temp, :, :, 1)
+        view(temp,:,:,1)
     end
     fig = Figure()
     ax = Axis(fig[1, 1])
