@@ -76,10 +76,15 @@ function apply!(kernel!, grid, args; ndrange = ndrange(grid))
     nothing
 end
 
+"Scalar-valued spectral field (RFFT-sized)."
 scalarfield(g::Grid{D,T}) where {D,T} =
     KernelAbstractions.zeros(g.backend, Complex{T}, ndrange(g))
+
+"Vector-valued spectral field."
 vectorfield(g::Grid{2}) = (; x = scalarfield(g), y = scalarfield(g))
 vectorfield(g::Grid{3}) = (; x = scalarfield(g), y = scalarfield(g), z = scalarfield(g))
+
+"Symmetric-tensor-valued spectral field."
 tensorfield(g::Grid{2}) = (; xx = scalarfield(g), yy = scalarfield(g), xy = scalarfield(g))
 tensorfield(g::Grid{3}) = (;
     xx = scalarfield(g),
@@ -89,6 +94,8 @@ tensorfield(g::Grid{3}) = (;
     yz = scalarfield(g),
     zx = scalarfield(g),
 )
+
+"Non-symmetric-tensor-valued spectral field."
 tensorfield_nonsym(g::Grid{2}) =
     (; xx = scalarfield(g), yx = scalarfield(g), xy = scalarfield(g), yy = scalarfield(g))
 tensorfield_nonsym(g::Grid{3}) = (;
@@ -103,11 +110,16 @@ tensorfield_nonsym(g::Grid{3}) = (;
     zz = scalarfield(g),
 )
 
+"Scalar-valued physical-space field."
 spacescalarfield(g::Grid{D,T}) where {D,T} =
     KernelAbstractions.zeros(g.backend, T, ntuple(Returns(g.n), D))
+
+"Vector-valued physical-space field."
 spacevectorfield(g::Grid{2}) = (; x = spacescalarfield(g), y = spacescalarfield(g))
 spacevectorfield(g::Grid{3}) =
     (; x = spacescalarfield(g), y = spacescalarfield(g), z = spacescalarfield(g))
+
+"Symmetric-tensor-valued physical-space field."
 spacetensorfield(g::Grid{2}) =
     (; xx = spacescalarfield(g), yy = spacescalarfield(g), xy = spacescalarfield(g))
 spacetensorfield(g::Grid{3}) = (;
@@ -118,6 +130,8 @@ spacetensorfield(g::Grid{3}) = (;
     yz = spacescalarfield(g),
     zx = spacescalarfield(g),
 )
+
+"Non-symmetric-tensor-valued physical-space field."
 spacetensorfield_nonsym(g::Grid{2}) = (;
     xx = spacescalarfield(g),
     yx = spacescalarfield(g),
@@ -136,6 +150,7 @@ spacetensorfield_nonsym(g::Grid{3}) = (;
     zz = spacescalarfield(g),
 )
 
+"Make vector field solenoidal."
 @kernel function project!(u, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumbers(g, I)
@@ -156,6 +171,7 @@ end
     u.z[I] = uz - kz * p
 end
 
+"Set ghost components to zero."
 @kernel function twothirds!(u, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = fftfreq_int(g, I)
@@ -460,7 +476,7 @@ function spectrum(u, grid; npoint = nothing, stuff = spectral_stuff(grid; npoint
     (; k, s)
 end
 
-# Account for RFFT
+"Sum of squared modulus that also accounts for missing modes in RFFT."
 getenergy(u) = sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:(size(u, 1)-1)))
 
 @kernel function vectorgradient!(G, u, g::Grid{2})
@@ -555,6 +571,7 @@ function forwardeuler!(f!, u, cache, grid, Δt; args...)
     apply!(project!, grid, (u, grid))
 end
 
+"Adams-Bashforth-Crank-Nicolson time stepping."
 @kernel function abcn_kernel!(u, du, du_old, Δt, visc, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumbers(g, I)
@@ -606,6 +623,7 @@ function convectiondiffusion!(du, u, grid, cache; visc)
     apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
+"Pre-allocate temporary arrays and RFFT plan for time stepping."
 getcache(grid) = (;
     ustart = vectorfield(grid),
     du = vectorfield(grid),
@@ -662,6 +680,7 @@ function wray3!(f!, u, Δt, grid, cache; args...)
     u
 end
 
+"Ornstein-Uhlenbeck forcing setup."
 function ouforcer(grid, kcut)
     kmax = div(grid.n, 2)
     D = dim(grid)
