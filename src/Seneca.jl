@@ -31,32 +31,49 @@ struct Grid{D,T,B}
     end
 end
 
+"Physical dimension."
 @inline dim(::Grid{D}) where {D} = D
+
+"Number of components in symmetric tensor."
 @inline tensordim(::Grid{2}) = 3
 @inline tensordim(::Grid{3}) = 6
+
+"Grid spacing."
 @inline spacing(g::Grid) = g.l / g.n
+
+"Volume of a grid cell."
 @inline volume(g::Grid{D}) where {D} = (g.l / g.n)^D
 
 # Like fftfreq, but with proper type
 @inline fftfreq_int(g::Grid, i::Int) = i - 1 - ifelse(i <= (g.n + 1) >> 1, 0, g.n)
-@inline fftfreq_int(g::Grid, I::CartesianIndex{2}) = I.I[1] - 1, fftfreq_int(g, I.I[2])
-@inline fftfreq_int(g::Grid, I::CartesianIndex{3}) =
+
+"Integer wavenumber vector."
+@inline wavenumber_int(g::Grid, I::CartesianIndex{2}) = I.I[1] - 1, fftfreq_int(g, I.I[2])
+@inline wavenumber_int(g::Grid, I::CartesianIndex{3}) =
     I.I[1] - 1, fftfreq_int(g, I.I[2]), fftfreq_int(g, I.I[3])
-@inline wavenumbers(g::Grid, I::CartesianIndex{2}) =
+
+"""
+Get wavenumber with dimensional part as ``2 \\pi k / l``,
+where ``k \\ \\in \\mathbb{Z}^3`` is an integer-wavenumber-vector.
+"""
+@inline wavenumber_full(g::Grid, I::CartesianIndex{2}) =
     pi / g.l * 2 * (I.I[1] - 1), pi / g.l * 2 * fftfreq_int(g, I.I[2])
-@inline wavenumbers(g::Grid, I::CartesianIndex{3}) = (
+@inline wavenumber_full(g::Grid, I::CartesianIndex{3}) = (
     pi / g.l * 2 * (I.I[1] - 1),
     pi / g.l * 2 * fftfreq_int(g, I.I[2]),
     pi / g.l * 2 * fftfreq_int(g, I.I[3]),
 )
-@inline function squared_wavenumber(g::Grid{2}, I)
-    kx, ky = fftfreq_int(g, I)
+
+@inline function squared_wavenumber_int(g::Grid{2}, I)
+    kx, ky = wavenumber_int(g, I)
     kx^2 + ky^2
 end
-@inline function squared_wavenumber(g::Grid{3}, I)
-    kx, ky, kz = fftfreq_int(g, I)
+@inline function squared_wavenumber_int(g::Grid{3}, I)
+    kx, ky, kz = wavenumber_int(g, I)
     kx^2 + ky^2 + kz^2
 end
+
+@inline squared_wavenumber_full(g, I) = (pi / g.l * 2)^2 * squared_wavenumber_int(g, I)
 
 "Range for RFFT sized spectral arrays."
 ndrange((; n)::Grid{2}) = div(n, 2) + 1, n
@@ -153,7 +170,7 @@ spacetensorfield_nonsym(g::Grid{3}) = (;
 "Make vector field solenoidal."
 @kernel function project!(u, g::Grid{2})
     I = @index(Global, Cartesian)
-    kx, ky = wavenumbers(g, I)
+    kx, ky = wavenumber_full(g, I)
     ux, uy = u.x[I], u.y[I]
     p = (kx * ux + ky * uy) / (kx * kx + ky * ky)
     p = ifelse(I.I == (1, 1), zero(p), p) # Leave constant mode intact
@@ -162,7 +179,7 @@ spacetensorfield_nonsym(g::Grid{3}) = (;
 end
 @kernel function project!(u, g::Grid{3})
     I = @index(Global, Cartesian)
-    kx, ky, kz = wavenumbers(g, I)
+    kx, ky, kz = wavenumber_full(g, I)
     ux, uy, uz = u.x[I], u.y[I], u.z[I]
     p = (kx * ux + ky * uy + kz * uz) / (kx * kx + ky * ky + kz * kz)
     p = ifelse(I.I == (1, 1, 1), zero(p), p) # Leave constant mode intact
@@ -174,20 +191,22 @@ end
 "Set ghost components to zero."
 @kernel function twothirds!(u, g::Grid{2})
     I = @index(Global, Cartesian)
-    kx, ky = fftfreq_int(g, I)
+    kx, ky = wavenumber_int(g, I)
     kcut = div(g.n, 3)
+    nonzero = (kx, ky) != (0, 0)
     ix = abs(kx) ≤ kcut
     iy = abs(ky) ≤ kcut
-    u[I] = ifelse(ix & iy, u[I], zero(eltype(u)))
+    u[I] = ifelse(nonzero & ix & iy, u[I], zero(eltype(u)))
 end
 @kernel function twothirds!(u, g::Grid{3})
     I = @index(Global, Cartesian)
-    kx, ky, kz = fftfreq_int(g, I)
+    kx, ky, kz = wavenumber_int(g, I)
     kcut = div(g.n, 3)
+    nonzero = (kx, ky, kz) != (0, 0, 0)
     ix = abs(kx) ≤ kcut
     iy = abs(ky) ≤ kcut
     iz = abs(kz) ≤ kcut
-    u[I] = ifelse(ix & iy & iz, u[I], zero(eltype(u)))
+    u[I] = ifelse(nonzero & ix & iy & iz, u[I], zero(eltype(u)))
 end
 
 getplan(grid) = plan_rfft(spacescalarfield(grid))
@@ -218,7 +237,7 @@ end
 
 @kernel function viscosity!(σ, u, visc, g::Grid{2})
     I = @index(Global, Cartesian)
-    kx, ky = wavenumbers(g, I)
+    kx, ky = wavenumber_full(g, I)
     ux, uy = u.x[I], u.y[I]
     σ.xx[I] -= visc * im * kx * ux
     σ.yy[I] -= visc * im * ky * uy
@@ -226,7 +245,7 @@ end
 end
 @kernel function viscosity!(σ, u, visc, g::Grid{3})
     I = @index(Global, Cartesian)
-    kx, ky, kz = wavenumbers(g, I)
+    kx, ky, kz = wavenumber_full(g, I)
     ux, uy, uz = u.x[I], u.y[I], u.z[I]
     σ.xx[I] -= visc * im * kx * ux
     σ.yy[I] -= visc * im * ky * uy
@@ -244,24 +263,24 @@ end
 
 @kernel function vectordivergence!(div, u, g::Grid{2})
     I = @index(Global, Cartesian)
-    kx, ky = wavenumbers(g, I)
+    kx, ky = wavenumber_full(g, I)
     div[I] = im * kx * u.x[I] + im * ky * u.y[I]
 end
 @kernel function vectordivergence!(div, u, g::Grid{3})
     I = @index(Global, Cartesian)
-    kx, ky, kz = wavenumbers(g, I)
+    kx, ky, kz = wavenumber_full(g, I)
     div[I] = im * kx * u.x[I] + im * ky * u.y[I] + im * kz * u.z[I]
 end
 
 @kernel function tensordivergence!(div, σ, g::Grid{2})
     I = @index(Global, Cartesian)
-    kx, ky = wavenumbers(g, I)
+    kx, ky = wavenumber_full(g, I)
     div.x[I] = -im * kx * σ.xx[I] - im * ky * σ.xy[I]
     div.y[I] = -im * kx * σ.xy[I] - im * ky * σ.yy[I]
 end
 @kernel function tensordivergence!(div, σ, g::Grid{3})
     I = @index(Global, Cartesian)
-    kx, ky, kz = wavenumbers(g, I)
+    kx, ky, kz = wavenumber_full(g, I)
     div.x[I] = -im * kx * σ.xx[I] - im * ky * σ.xy[I] - im * kz * σ.zx[I]
     div.y[I] = -im * kx * σ.xy[I] - im * ky * σ.yy[I] - im * kz * σ.yz[I]
     div.z[I] = -im * kx * σ.zx[I] - im * ky * σ.yz[I] - im * kz * σ.zz[I]
@@ -313,7 +332,7 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
     # Do everything squared to avoid floats
     @kernel function mask!(mask, kleft, g)
         I = @index(Global, Cartesian)
-        k2 = squared_wavenumber(g, I)
+        k2 = squared_wavenumber_int(g, I)
         mask[I] = kleft^2 ≤ k2 < (kleft + 1)^2
     end
 
@@ -324,12 +343,15 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
 
     # RFFT exploits conjugate symmetry, so we only need half the modes
     kmax = div(grid.n, 2)
-    range = ndrange(grid)
+    T = typeof(grid.l)
 
     # Allocate arrays
-    E = similar(u.x, range...)
+    E = similar(u.x, T, ndrange(grid)...)
     Emask = similar(E)
     mask = similar(E, Bool)
+
+    # Set ghost cells to zero
+    foreach(u -> apply!(twothirds!, grid, (u, grid)), u)
 
     # Compute energy
     if dim(grid) == 2
@@ -349,7 +371,7 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
     for k = 0:kdiag
         apply!(mask!, grid, (mask, k, grid)) # Shell mask
         @. Emask = mask * E
-        Eshell = sum(Emask) + sum(view(Emask,(2:kmax),:,:)) # Current energy in shell
+        Eshell = sum(Emask) + sum(selectdim(Emask, 1, 2:kmax)) # Current energy in shell
         E0 = totalenergy * profile(k, kpeak) / totalprofile # Desired energy in shell
         factor = sqrt(E0 / Eshell) # E = u^2 / 2
         for u in u
@@ -375,7 +397,7 @@ end
 
 @kernel function z_vort_kernel!(vort, u, grid)
     I = @index(Global, Cartesian)
-    k = wavenumbers(grid, I)
+    k = wavenumber_full(grid, I)
     kx, ky = k[1], k[2]
     ux, uy = u.x[I], u.y[I]
     vort[I] = -im * ky * ux + im * kx * uy
@@ -396,20 +418,8 @@ function spectral_stuff(grid; npoint = nothing)
     n = grid.n
     kmax = div(n, 2)
 
-    kk = if dim(grid) == 2
-        kx = 0:kmax # For RFFT, the x-wavenumbers are 0:kmax
-        ky = reshape(map(i -> fftfreq_int(grid, i), 1:grid.n), 1, :) # Normal FFT wavenumbers
-        @. kx^2 + ky^2
-    else
-        kx = 0:kmax # For RFFT, the x-wavenumbers are 0:kmax
-        ky = reshape(map(i -> fftfreq_int(grid, i), 1:grid.n), 1, :) # Normal FFT wavenumbers
-        kz = reshape(map(i -> fftfreq_int(grid, i), 1:grid.n), 1, 1, :) # Normal FFT wavenumbers
-        @. kx^2 + ky^2 + kz^2
-    end
-    kk = reshape(kk, :)
-
-    isort = sortperm(kk) # Permutation for sorting the wavenumbers
-    kksort = kk[isort]
+    k2 = map(I -> squared_wavenumber_int(grid, I), CartesianIndices(ndrange(grid)))
+    k2 = reshape(k2, :)
 
     # Output query points (evenly log-spaced, but only integer wavenumbers)
     kcut = div(2 * kmax, 3)
@@ -421,67 +431,38 @@ function spectral_stuff(grid; npoint = nothing)
         kuse = sort(unique(round.(Int, kuse)))
     end
 
-    # Since the wavenumbers are sorted, we just need to find the start and stop of each shell.
-    # The linear indices for that shell is then given by the permutation in that range.
-    inds = map(kuse) do k
-        jstart = findfirst(≥(k^2), kksort)
-        jstop = findfirst(≥((k + 1)^2), kksort)
-        isnothing(jstop) && (jstop = length(kksort) + 1) # findfirst may return nothing
-        jstop -= 1
-        isort[jstart:jstop] # Linear indices of the i-th shell
-    end
-
-    # We need to adapt the shells for RFFT.
-    # Consider the following example:
-    #
-    # julia> n, kmax = 8, 4;
-    # julia> u = randn(n, n, n);
-    # julia> f = fft(u); r = rfft(u);
-    # julia> sum(abs2, f)
-    # 275142.33506202063
-    # julia> sum(abs2, r) + sum(abs2, view(r, 2:kmax, :, :))
-    # 275142.3350620207
-    #
-    # To compute the energy of the FFT, we need an additional term for RFFT.
-    # The second term sums over all the x-indices except for 1 and kmax + 1.
-    # We thus need to add indices to account for the conjugate symmetry in RFFT.
-    # For an RFFT array r of size (kmax + 1, n, n), we have the linear index relation
-    # r[i] == r[x, y, z]
-    # if
-    # i == x + (y - 1) * (kmax + 1) + (z - 1) * (kmax + 1) * n.
-    # We therefore need to exclude the indices:
-    # (x == 1), i.e. (i % (kmax + 1) == 1), and
-    # (x == kmax + 1), i.e. (i % (kmax + 1) == 0).
-    # We only keep i if (i % (kmax + 1) > 1).
-    conjinds = map(i -> filter(j -> j % (kmax + 1) > 1, i), inds)
-    inds = map(vcat, inds, conjinds) # Include conjugate indices
+    shells = getshells(grid, kuse)
+    inds = map(s -> vcat(s.inds...), shells) # Include conjugate indices
 
     # Put indices on GPU
     inds = map(adapt(backend), inds)
 
-    # Temporary arrays for spectrum computation
-    e = KernelAbstractions.allocate(backend, T, ndrange(grid))
-
-    (; shells = inds, k = kuse, e)
+    (; shells = inds, k = 2π / l * kuse)
 end
 
-function spectrum(u, grid; npoint = nothing, stuff = spectral_stuff(grid; npoint))
-    (; shells, k, e) = stuff
-    if dim(grid) == 2
-        @. e = abs2(u.x) / 2 + abs2(u.y) / 2
-    else
-        @. e = abs2(u.x) / 2 + abs2(u.y) / 2 + abs2(u.z) / 2
+function spectrum(u, grid, stuff = spectral_stuff(grid))
+    (; shells, k) = stuff
+    s = map(shells) do shell
+        sum(u -> sum(abs2, view(u, shell)) / 2, u)
     end
-    s = map(i -> sum(view(e, i)), shells) # Total energy in each shell
     (; k, s)
 end
 
 "Sum of squared modulus that also accounts for missing modes in RFFT."
 getenergy(u) = sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:(size(u, 1)-1)))
 
+"Sum of that also accounts for missing modes in RFFT."
+spectralsum(f, u) = sum(f, u) + sum(f, selectdim(u, 1, 2:(size(u, 1)-1)))
+export spectralsum
+
+"Dot product of that also accounts for missing modes in RFFT."
+spectraldot(u, v) =
+    dot(u, v) + dot(selectdim(u, 1, 2:(size(u, 1)-1)), selectdim(v, 1, 2:(size(v, 1)-1)))
+export spectraldot
+
 @kernel function vectorgradient!(G, u, g::Grid{2})
     I = @index(Global, Cartesian)
-    kx, ky = wavenumbers(g, I)
+    kx, ky = wavenumber_full(g, I)
     ux, uy = u.x[I], u.y[I]
     G.xx[I] = im * kx * ux
     G.xy[I] = im * ky * ux
@@ -490,7 +471,7 @@ getenergy(u) = sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:(size(u, 1)-1)))
 end
 @kernel function vectorgradient!(G, u, g::Grid{3})
     I = @index(Global, Cartesian)
-    kx, ky, kz = wavenumbers(g, I)
+    kx, ky, kz = wavenumber_full(g, I)
     ux, uy, uz = u.x[I], u.y[I], u.z[I]
     G.xx[I] = im * kx * ux
     G.xy[I] = im * ky * ux
@@ -506,13 +487,13 @@ end
 export derivative!
 @kernel function derivative!(du, u, j, g::Grid)
     I = @index(Global, Cartesian)
-    kj = wavenumbers(g, I)[j]
+    kj = wavenumber_full(g, I)[j]
     du[I] = im * kj * u[I]
 end
 
 @kernel function strainrate!(S, u, g::Grid{2})
     I = @index(Global, Cartesian)
-    kx, ky = wavenumbers(g, I)
+    kx, ky = wavenumber_full(g, I)
     ux, uy = u.x[I], u.y[I]
     S.xx[I] = im * kx * ux
     S.yy[I] = im * ky * uy
@@ -520,7 +501,7 @@ end
 end
 @kernel function strainrate!(S, u, g::Grid{3})
     I = @index(Global, Cartesian)
-    kx, ky, kz = wavenumbers(g, I)
+    kx, ky, kz = wavenumber_full(g, I)
     ux, uy, uz = u.x[I], u.y[I], u.z[I]
     S.xx[I] = im * kx * ux
     S.yy[I] = im * ky * uy
@@ -530,28 +511,32 @@ end
     S.zx[I] = im * (kx * uz + kz * ux) / 2
 end
 
-function turbulence_statistics(u, visc, g)
+@kernel function dissipation_kernel!(diss, u, visc, g::Grid{2})
+    I = @index(Global, Cartesian)
+    k2 = squared_wavenumber_full(g, I)
+    u2 = abs2(u.x[I]) + abs2(u.y[I])
+    diss[I] = visc * k2 * u2
+end
+@kernel function dissipation_kernel!(diss, u, visc, g::Grid{3})
+    I = @index(Global, Cartesian)
+    k2 = squared_wavenumber_full(g, I)
+    u2 = abs2(u.x[I]) + abs2(u.y[I]) + abs2(u.z[I])
+    diss[I] = visc * k2 * u2
+end
+function get_dissipation!(diss, u, visc, g)
+    apply!(dissipation_kernel!, g, (diss, u, visc, g))
+    d = sum(diss) + sum(selectdim(diss, 1, 2:(size(diss, 1)-1)))
+end
+export get_dissipation!
+
+function turbulence_statistics(u, visc, g, dissfield = similar(u.x, typeof(g.l)))
+    D = dim(g)
     foreach(u -> apply!(twothirds!, g, (u, g)), u) # Empty ghost modes
     e = sum(getenergy, u) / 2
-    uavg = sqrt(2 * e)
-    S = tensorfield(g)
-    apply!(strainrate!, g, (S, u, g))
-    diss = if dim(g) == 2
-        2 * visc * (getenergy(S.xx) + getenergy(S.yy) + 2 * getenergy(S.xy))
-    else
-        2 *
-        visc *
-        (
-            getenergy(S.xx) +
-            getenergy(S.yy) +
-            getenergy(S.zz) +
-            2 * getenergy(S.xy) +
-            2 * getenergy(S.yz) +
-            2 * getenergy(S.zx)
-        )
-    end
+    uavg = sqrt(2 * e / D)
+    diss = get_dissipation!(dissfield, u, visc, g)
     l_kol = (visc^3 / diss)^(1 / 4)
-    l_tay = sqrt(visc / diss) * uavg
+    l_tay = sqrt(15 * visc / diss) * uavg
     l_int = uavg^3 / diss
     t_int = l_int / uavg
     t_tay = l_tay / uavg
@@ -574,14 +559,14 @@ end
 "Adams-Bashforth-Crank-Nicolson time stepping."
 @kernel function abcn_kernel!(u, du, du_old, Δt, visc, g::Grid{2})
     I = @index(Global, Cartesian)
-    kx, ky = wavenumbers(g, I)
+    kx, ky = wavenumber_full(g, I)
     a = Δt / 2 * visc * (kx^2 + ky^2)
     u.x[I] = (1 - a) / (1 + a) * u.x[I] + Δt / (1 + a) * (3 * du.x[I] - du_old.x[I]) / 2
     u.y[I] = (1 - a) / (1 + a) * u.y[I] + Δt / (1 + a) * (3 * du.y[I] - du_old.y[I]) / 2
 end
 @kernel function abcn_kernel!(u, du, du_old, Δt, visc, g::Grid{3})
     I = @index(Global, Cartesian)
-    kx, ky, kz = wavenumbers(g, I)
+    kx, ky, kz = wavenumber_full(g, I)
     a = Δt / 2 * visc * (kx^2 + ky^2 + kz^2)
     u.x[I] = (1 - a) / (1 + a) * u.x[I] + Δt / (1 + a) * (3 * du.x[I] - du_old.x[I]) / 2
     u.y[I] = (1 - a) / (1 + a) * u.y[I] + Δt / (1 + a) * (3 * du.y[I] - du_old.y[I]) / 2
@@ -684,7 +669,7 @@ end
 function ouforcer(grid, kcut)
     kmax = div(grid.n, 2)
     D = dim(grid)
-    kk = if D == 2
+    k2 = if D == 2
         kx = 0:kmax # For RFFT, the x-wavenumbers are 0:kmax
         ky = reshape(map(i -> fftfreq_int(grid, i), 1:grid.n), 1, :) # Normal FFT wavenumbers
         @. kx^2 + ky^2
@@ -694,9 +679,9 @@ function ouforcer(grid, kcut)
         kz = reshape(map(i -> fftfreq_int(grid, i), 1:grid.n), 1, 1, :) # Normal FFT wavenumbers
         @. kx^2 + ky^2 + kz^2
     end
-    kk = reshape(kk, :)
-    iuse = findall(kk -> 0 < kk < kcut^2, kk) # Exclude 0-th mode
-    kuse = kk[iuse]
+    k2 = reshape(k2, :)
+    iuse = findall(k2 -> 0 < k2 < kcut^2, k2) # Exclude 0-th mode
+    kuse = k2[iuse]
     nuse = length(iuse)
     x = complex(grid.l)
     b = KernelAbstractions.zeros(grid.backend, typeof(x), nuse, D)
@@ -704,9 +689,104 @@ function ouforcer(grid, kcut)
     (; iuse, kuse, b, bold)
 end
 
+"Get indices of wavenumbers with `|k| < kband`."
+function getband(grid, kband)
+    kmax = div(grid.n, 2)
+    D = dim(grid)
+
+    # Get squared wavenumbers in an RFFT-shaped array
+    k2 = map(I -> squared_wavenumber_int(grid, I), CartesianIndices(ndrange(grid)))
+
+    # Flatten since we work with linear RFFT indices
+    k2 = reshape(k2, :)
+
+    # Indices in band (without zero mode)
+    inds = filter(i -> 0 < k2[i] < kband^2, eachindex(k2))
+
+    # We need to adapt the band for RFFT.
+    # Consider the following example:
+    #
+    # julia> n, kmax = 8, 4;
+    # julia> u = randn(n, n, n);
+    # julia> f = fft(u); r = rfft(u);
+    # julia> sum(abs2, f)
+    # 275142.33506202063
+    # julia> sum(abs2, r) + sum(abs2, selectdim(r, 1, 2:kmax))
+    # 275142.3350620207
+    #
+    # To compute the energy of the FFT, we need an additional term for RFFT.
+    # The second term sums over all the x-indices except for 1 and kmax + 1.
+    # We thus need to add indices to account for the conjugate symmetry in RFFT.
+    # For an RFFT array r of size (kmax + 1, n, n), we have the linear index relation
+    # r[i] == r[x, y, z]
+    # if
+    # i == x + (y - 1) * (kmax + 1) + (z - 1) * (kmax + 1) * n.
+    # We therefore need to exclude the indices:
+    # (x == 1), i.e. (i % (kmax + 1) == 1), and
+    # (x == kmax + 1), i.e. (i % (kmax + 1) == 0).
+    # We only keep i if (i % (kmax + 1) > 1).
+    conjinds = filter(j -> j % (kmax + 1) > 1, inds)
+
+    (; inds, conjinds, k2 = k2[inds])
+end
+export getband
+
+"Get indices and wavenumbers for the `i`-th shell (`k` such that `i ≤ |k| < i + 1`)."
+function getshells(grid, shells)
+    kmax = div(grid.n, 2)
+    D = dim(grid)
+
+    # Get squared wavenumbers in an RFFT-shaped array
+    k2 = map(I -> squared_wavenumber_int(grid, I), CartesianIndices(ndrange(grid)))
+
+    # Flatten since we work with linear RFFT indices
+    k2 = reshape(k2, :)
+
+    isort = sortperm(k2) # Permutation for sorting the wavenumbers
+    k2sort = k2[isort]
+
+    # Get linear RFFT indices and corresponding waveumbers for each shell
+    map(shells) do i
+        # Since the wavenumbers are sorted, we just need to find the start and stop of each shell.
+        # The linear indices for that shell is then given by the permutation in that range.
+        jstart = findfirst(≥(i^2), k2sort)
+        jstop = findfirst(≥((i + 1)^2), k2sort)
+        isnothing(jstop) && (jstop = length(k2sort) + 1) # findfirst may return nothing
+        jstop -= 1
+        inds = isort[jstart:jstop] # Linear indices of the i-th shell
+
+        # We need to adapt the shells for RFFT.
+        # Consider the following example:
+        #
+        # julia> n, kmax = 8, 4;
+        # julia> u = randn(n, n, n);
+        # julia> f = fft(u); r = rfft(u);
+        # julia> sum(abs2, f)
+        # 275142.33506202063
+        # julia> sum(abs2, r) + sum(abs2, selectdim(r, 1, 2:kmax))
+        # 275142.3350620207
+        #
+        # To compute the energy of the FFT, we need an additional term for RFFT.
+        # The second term sums over all the x-indices except for 1 and kmax + 1.
+        # We thus need to add indices to account for the conjugate symmetry in RFFT.
+        # For an RFFT array r of size (kmax + 1, n, n), we have the linear index relation
+        # r[i] == r[x, y, z]
+        # if
+        # i == x + (y - 1) * (kmax + 1) + (z - 1) * (kmax + 1) * n.
+        # We therefore need to exclude the indices:
+        # (x == 1), i.e. (i % (kmax + 1) == 1), and
+        # (x == kmax + 1), i.e. (i % (kmax + 1) == 0).
+        # We only keep i if (i % (kmax + 1) > 1).
+        conjinds = filter(j -> j % (kmax + 1) > 1, inds)
+
+        (; shell = i, inds = (inds, conjinds), k2 = (k2[inds], k2[conjinds]))
+    end
+end
+export getshells
+
 # @kernel function vectorgradient!(Gij, u, grid::Grid{3}, i, j)
 #     I = @index(Global, Cartesian)
-#     kk = wavenumbers(grid, I)
+#     kk = wavenumber(grid, I)
 #     uu = u.x[I], u.y[I], u.z[I]
 #     Gij[I] = im * kk[j] * uu[i]
 # end
@@ -716,7 +796,7 @@ end
 #     g = G.xx[I]
 # end
 
-export Grid, apply!, dim, tensordim, spacing, volume, wavenumbers
+export Grid, apply!, dim, tensordim, spacing, volume, wavenumber_full
 export scalarfield, vectorfield, tensorfield, tensorfield_nonsym, randomfield, taylorgreen
 export spacescalarfield, spacevectorfield, spacetensorfield, spacetensorfield_nonsym
 export vectorgradient!, strainrate!, turbulence_statistics, z_vort!, energy, getenergy
