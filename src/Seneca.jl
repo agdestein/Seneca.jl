@@ -286,7 +286,9 @@ end
     div.z[I] = -im * kx * σ.zx[I] - im * ky * σ.yz[I] - im * kz * σ.zz[I]
 end
 
-profile(k, kpeak) = k^4 * exp(-2 * (k / kpeak)^2)
+peak_profile(k; kpeak) = k^4 * exp(-2 * (k / kpeak)^2)
+linear_profile(k) = (k > 0) * k^(-5 / 3)
+export peak_profile, linear_profile
 
 "Taylor-Green vortex."
 function taylorgreen(g::Grid{2}, plan)
@@ -326,8 +328,9 @@ end
 
 """
 Make random velocity field with prescribed energy spectrum profile.
+Additional kwargs are passed to `profile(k; kwargs...)`.
 """
-function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng())
+function randomfield(profile, grid; totalenergy = 1, rng = Random.default_rng(), kwargs...)
     # Mask for active wavenumbers: kleft ≤ k < kleft + 1
     # Do everything squared to avoid floats
     @kernel function mask!(mask, kleft, g)
@@ -365,14 +368,14 @@ function randomfield(grid; kpeak = 5, totalenergy = 1, rng = Random.default_rng(
     # k23 = round(Int, 2 / 3 * kmax)
 
     # Sum of shell weights 
-    totalprofile = sum(k -> profile(k, kpeak), 0:kdiag)
+    totalprofile = sum(k -> profile(k; kwargs...), 0:kdiag)
 
     # Adjust energy in each partially resolved shell [k, k+1)
     for k = 0:kdiag
         apply!(mask!, grid, (mask, k, grid)) # Shell mask
         @. Emask = mask * E
         Eshell = sum(Emask) + sum(selectdim(Emask, 1, 2:kmax)) # Current energy in shell
-        E0 = totalenergy * profile(k, kpeak) / totalprofile # Desired energy in shell
+        E0 = totalenergy * profile(k; kwargs...) / totalprofile # Desired energy in shell
         factor = sqrt(E0 / Eshell) # E = u^2 / 2
         for u in u
             @. u = ifelse(mask, factor * u, u)
